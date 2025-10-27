@@ -15,9 +15,9 @@ from dspy.primitives.prediction import Prediction
 from dspy.streaming.messages import StreamResponse
 from dspy.signatures.signature import Signature, ensure_signature
 from dspy.utils.callback import BaseCallback
-from typing import Any, get_origin, List, AsyncIterator
+from typing import Any, get_origin, List, AsyncIterator, get_args
 from asyncio import Queue
-from ..alto.lmtextpipe import LMTextPipe, WordOutput, LineOutput, SentenceOutput, FullTextOutput
+from ..alto.lmtextpipe import  LMPartialOutput, LMTextPipe, WordOutput, LineOutput, SentenceOutput, FullTextOutput
 #from anyio import create_memory_object_stream, create_task_group
 logger = logging.getLogger(__name__)
 
@@ -32,19 +32,18 @@ class StreamPredict(Module):
             invocation by passing a ``config`` dictionary when calling the
             module. For example::
 
-                predict = dspy.Predict("q -> a", rollout_id=1, temperature=1.0)
+                predict = dspy.Predict("q -> a: list[str]", rollout_id=1, temperature=1.0)
                 predict(q="What is 1 + 52?", config={"rollout_id": 2, "temperature": 1.0})
     """
 
     def __init__(self, signature: str | type[Signature], callbacks: list[BaseCallback] | None = None,
-        is_streaming: bool = False, grandularity = FullTextOutput, **config):
+        is_streaming: bool = False, **config):
         super().__init__(callbacks=callbacks)
         self.stage = random.randbytes(8).hex()
         self.signature = ensure_signature(signature)
         self.is_streaming = is_streaming
         #self._predict = Predict(signature, callbacks=callbacks, **config)
         self.config = config
-        self.grandularity = grandularity
         self.reset()
     # def forward(self, **kwargs):
 
@@ -182,25 +181,30 @@ class StreamPredict(Module):
         kwargs = dict(kwargs)
         #cache = kwargs.pop("cache", None)
         #num_retries  = int(kwargs.pop("num_retries", 3))
-        if not lm.model or not lm.api_base:
-            # fallback non-streaming
-            outputs = await lm.acall(messages=messages, **kwargs)
-            text = (outputs.get("text") if isinstance(outputs, dict) else str(outputs))
-            if text:
-                yield text
-            return
-        stream = litellm.acompletion(
+
+        # if not lm.model or not lm.api_base:
+        #     # fallback non-streaming
+        #     outputs = await lm.acall(messages=messages, **kwargs)
+        #     text = (outputs.get("text") if isinstance(outputs, dict) else str(outputs))
+        #     if text:
+        #         yield text
+        #     return
+        print(f"lm.kwarg {lm.kwargs}")
+        print(lm.kwargs.get("api_base"))
+        print(lm.kwargs.get("api_key"))
+        stream = await litellm.acompletion(
         model=lm.model,
         messages=messages,
         stream=True,
-        api_base=lm.api_base,
-        api_key=getattr(lm, "api_key", None),
+        api_base=lm.kwargs.get("api_base"),
+        api_key=lm.kwargs.get("api_key"),
         **kwargs,
         )
         async for chunk in stream:
             piece = None
             try:
                 piece = chunk.choices[0].delta.content
+                print(f"lm stream token: {piece}")
             except Exception:
                 piece = None
             if piece:
@@ -209,12 +213,15 @@ class StreamPredict(Module):
     async def _lm_caller(self, lm, config, signature, messages, out_field_name):
         out_anno = signature.output_fields[out_field_name].annotation
         origin = get_origin(out_anno)
-        should_be_list = (origin is list)
+        should_be_list = True
         print(should_be_list)
         lmtextpipe_otuput = []
         raw_tokens = []
-        output_split = self.grandularity if should_be_list else WordOutput
-
+        granularity = get_args(out_anno)
+        output_split = granularity if should_be_list else WordOutput
+        if isinstance(output_split, tuple):
+            output_split = output_split[0]
+        print(type(output_split))    
         q: Queue[str | None] = Queue()
         pipe = LMTextPipe(queue=q, output_type=output_split)
 
@@ -241,11 +248,14 @@ class StreamPredict(Module):
     async def _lm_stream_caller(self, lm, config, signature, messages, out_field_name):
         out_anno = signature.output_fields[out_field_name].annotation
         origin = get_origin(out_anno)
+        granularity = get_args(out_anno)
         should_be_list = (origin is list)
-        
+        #print(out_anno)
+        print(f"granularity {granularity}" )
         raw_tokens = []
-        output_split = self.grandularity if should_be_list else WordOutput
-
+        output_split = granularity if should_be_list else FullTextOutput
+        if isinstance(output_split, tuple):
+            output_split = output_split[0]
         q: Queue[str | None] = Queue()
         pipe = LMTextPipe(queue=q, output_type=output_split)
 

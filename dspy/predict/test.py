@@ -1,54 +1,48 @@
-# simple_streampredict_demo.py
 import asyncio
+import pydantic
+from pydantic import BaseModel, ConfigDict 
 import dspy
 from dspy import StreamPredict
-from dspy.clients.base_lm import BaseLM
-# --- YOUR StreamPredict class must be importable here ---
-# from your_module import StreamPredict
-
-# A tiny fake LM that satisfies your _lm_token_stream() fallback path:
-# - No model/api_base -> it uses lm.acall(...) non-streaming mode
-# - Returns a dict with "text", which your code joins/streams via LMTextPipe
-class FakeLM(BaseLM):
-    def __init__(self):
-        # model="" ensures the fallback branch (no external server needed)
-        super().__init__(model="")
-        self.model = ""        # falsy, triggers non-streaming fallback in _lm_token_stream
-        self.api_base = None   # falsy, same reason
-        self.kwargs = {}
-
-    async def acall(self, messages, **kwargs):
-        # You can craft the text however you like; this is enough to demo
-        # messages is a list of {"role": ..., "content": ...}, per your formatter
-        return {"text": "Hello from FakeLM! 1 + 1 = 2."}
-
-    def dump_state(self):
-        return {"type": "FakeLM"}
-
-# Define a simple signature
-class QA(dspy.Signature):
-    question: str = dspy.InputField()
-    answer: list[str]   = dspy.OutputField()
-
+from ..alto.lmtextpipe import WordOutput, LineOutput, SentenceOutput, FullTextOutput
 async def main():
-    # Use FakeLM inside the DSPy context so your StreamPredict can find it
-    with dspy.context(lm=FakeLM()):
-        # --- Non-streaming usage: returns a dspy.Prediction ---
-        non_streaming = StreamPredict(QA, is_streaming=False)
-        pred = await non_streaming.aforward(question="What is 1+1?")
-        print("[non-streaming] answer:", pred.answer)
-        print(type(pred.answer))
+    class SplitType: 
+        output_type = None
+    class NewlineSplit(SplitType):
+        output_type = LineOutput
+    class NewSentenceSplit(SplitType):
+        output_type = SentenceOutput 
+    class NewWordSplit(SplitType): 
+        output_type = WordOutput    
+    class NewFullTextSplit(SplitType): 
+        output_type = FullTextOutput 
+    lm = dspy.LM(
+        "openai/open-orca/mistral-7b-openorca",
+        api_base="http://localhost:8001/v1",
+        api_key="fake-key",
+        model_type='chat',
+        temperature = 0.5,
+        cache=False,
+        )
+    dspy.configure(lm=lm)
+    # class QueryResult(pydantic.BaseModel):
+    #     model_config = ConfigDict(arbitrary_types_allowed=True)
+    #     granularity = "LineOutput"
 
-        # --- Streaming usage: returns an async iterator of STRINGS (your current code) ---
-        streaming = StreamPredict(QA, is_streaming=True)
-        stream = await streaming.aforward(question="Stream the answer to 1+1, please.")
-        chunks = []
-        async for chunk in stream:
-            # Your _lm_stream_caller currently yields raw string segments
-            print("[stream chunk]", repr(chunk))
-            chunks.append(chunk)
-        print("[stream joined]", "".join(chunks))
+    class TestSignature(dspy.Signature):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        input_text: str = dspy.InputField()
+        output_text: list["LineOutput"] = dspy.OutputField()
 
+    program = StreamPredict(TestSignature, is_streaming=True)
+
+    output_stream1 = await program.aforward(input_text="is sun bright?")         
+    async for chunk in output_stream1:
+        print(f"stream output:{chunk} with type {type(chunk)}")
+
+    program2 = StreamPredict(TestSignature, is_streaming=False)
+
+    output_stream2 = await program2.aforward(input_text="is sun bright?")
+    print(f"result: {output_stream2.output_text}")
+    assert isinstance(output_stream2, dspy.Prediction)       
 if __name__ == "__main__":
     asyncio.run(main())
-
